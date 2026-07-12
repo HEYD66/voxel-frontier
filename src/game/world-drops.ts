@@ -76,6 +76,7 @@ interface WorldDropEntity {
 
 const MATERIAL_COLORS: Readonly<Record<string, string>> = {
   coal: '#2f3439',
+  gunpowder: '#454640',
   raw_iron: '#b7744f',
   iron_ingot: '#cbd2d2',
   diamond: '#42cfc6',
@@ -498,6 +499,7 @@ export class WorldDropManager extends THREE.Group {
     }
     if (kind === 'tool' && isToolItemId(item)) return this.createToolVisual(item);
     if (kind === 'armor' && isArmorItemId(item)) return this.createArmorVisual(item);
+    if (item === 'gunpowder') return this.createGunpowderVisual();
     if (item === 'stick') {
       const mesh = new THREE.Mesh(this.stickGeometry, this.getMaterial('material:stick', MATERIAL_COLORS.stick!));
       mesh.rotation.z = Math.PI * 0.32;
@@ -511,6 +513,28 @@ export class WorldDropManager extends THREE.Group {
       this.materialGeometry,
       this.getMaterial(`material:${String(item)}`, MATERIAL_COLORS[String(item)] ?? '#8d765b')
     );
+  }
+
+  private createGunpowderVisual(): THREE.Group {
+    const group = new THREE.Group();
+    group.name = 'Dropped gunpowder';
+    const grains: ReadonlyArray<readonly [number, number, number, number, string]> = [
+      [-0.07, 0.035, 0, 0.52, '#454640'],
+      [0.055, 0.06, 0.015, 0.43, '#6b6a60'],
+      [0.065, -0.055, -0.01, 0.48, '#292a27'],
+      [-0.06, -0.065, 0.018, 0.38, '#858277']
+    ];
+    grains.forEach(([x, y, z, scale, color], index) => {
+      const grain = new THREE.Mesh(
+        this.materialGeometry,
+        this.getMaterial(`material:gunpowder:${index}`, color)
+      );
+      grain.name = `Dropped gunpowder grain ${index + 1}`;
+      grain.position.set(x, y, z);
+      grain.scale.setScalar(scale);
+      group.add(grain);
+    });
+    return group;
   }
 
   private createTorchVisual(): THREE.Group {

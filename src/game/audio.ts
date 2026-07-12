@@ -1,6 +1,6 @@
 import { BlockId } from './types';
 
-type SoundKind = 'break' | 'place' | 'step' | 'click' | 'splash';
+type SoundKind = 'break' | 'place' | 'step' | 'click' | 'splash' | 'hiss' | 'explosion';
 
 export class GameAudio {
   private context: AudioContext | null = null;
@@ -50,9 +50,27 @@ export class GameAudio {
     this.playNoise('break', 340, 0.09, 0.12);
   }
 
-  playMobHurt(kind: 'pig' | 'sheep' | 'cow' | 'zombie', killed = false): void {
-    const frequency = kind === 'zombie' ? 92 : kind === 'cow' ? 148 : kind === 'pig' ? 210 : 255;
-    this.playTone(frequency, killed ? 0.22 : 0.1, kind === 'zombie' ? 'sawtooth' : 'square', 0.11, killed ? -48 : 24);
+  playMobHurt(kind: 'pig' | 'sheep' | 'cow' | 'zombie' | 'creeper', killed = false): void {
+    const frequency = kind === 'zombie'
+      ? 92
+      : kind === 'creeper'
+        ? 126
+        : kind === 'cow'
+          ? 148
+          : kind === 'pig'
+            ? 210
+            : 255;
+    const type = kind === 'zombie' || kind === 'creeper' ? 'sawtooth' : 'square';
+    this.playTone(frequency, killed ? 0.22 : 0.1, type, 0.11, killed ? -48 : 24);
+  }
+
+  playCreeperPrime(): void {
+    this.playNoise('hiss', 1650, 1.35, 0.11);
+  }
+
+  playExplosion(): void {
+    this.playNoise('explosion', 170, 0.58, 0.34);
+    this.playTone(54, 0.34, 'sawtooth', 0.13, -24);
   }
 
   playPickup(): void {
@@ -119,16 +137,22 @@ export class GameAudio {
     const data = buffer.getChannelData(0);
     for (let i = 0; i < frameCount; i += 1) {
       const envelope = 1 - i / frameCount;
-      const grit = kind === 'break' ? Math.sign(Math.sin(i * 0.47)) * 0.22 : 0;
+      const grit = kind === 'break' || kind === 'explosion'
+        ? Math.sign(Math.sin(i * 0.47)) * 0.22
+        : 0;
       data[i] = (Math.random() * 2 - 1 + grit) * envelope;
     }
     const source = context.createBufferSource();
     const filter = context.createBiquadFilter();
     const gain = context.createGain();
     source.buffer = buffer;
-    filter.type = kind === 'splash' ? 'lowpass' : 'bandpass';
+    filter.type = kind === 'splash' || kind === 'explosion'
+      ? 'lowpass'
+      : kind === 'hiss'
+        ? 'highpass'
+        : 'bandpass';
     filter.frequency.value = cutoff;
-    filter.Q.value = kind === 'step' ? 0.8 : 1.5;
+    filter.Q.value = kind === 'step' || kind === 'explosion' ? 0.8 : 1.5;
     gain.gain.setValueAtTime(gainValue, context.currentTime);
     gain.gain.exponentialRampToValueAtTime(0.0001, context.currentTime + duration);
     source.connect(filter);

@@ -3,6 +3,15 @@ import { toInventoryItemStack } from './inventory-ui';
 import { ARMOR_ITEM_IDS } from './survival';
 
 describe('inventory item presentation', () => {
+  it('presents gunpowder as a stackable material', () => {
+    expect(toInventoryItemStack({ item: 'gunpowder', count: 7 })).toEqual({
+      itemId: 'gunpowder',
+      count: 7,
+      maxCount: 64,
+      icon: 'material'
+    });
+  });
+
   it('classifies beef, leather, and leather armor with their dedicated icon families', () => {
     expect(toInventoryItemStack({ item: 'raw_beef', count: 2 })).toMatchObject({
       itemId: 'raw_beef',

@@ -218,6 +218,8 @@ export class VoxelWorld extends THREE.Group {
   private readonly daylightUniform: VoxelDaylightUniform = { value: 1 };
   private readonly streamPlanner: ChunkStreamPlanner;
   private readonly lighting: StreamingLighting;
+  private readonly pendingBlockUpdateChunks = new Set<string>();
+  private blockUpdateBatchDepth = 0;
   private visibleChunkKeys = new Set<string>();
   private chestConnectionResolver: ChestConnectionResolver | null = null;
   private disposed = false;
@@ -321,8 +323,25 @@ export class VoxelWorld extends THREE.Group {
 
     if (!chunk) return true;
     const lightingUpdate = this.lighting.updateBlock(blockX, blockY, blockZ);
-    this.rebuildAffectedChunks(chunkX, chunkZ, localX, localZ, lightingUpdate.changedChunks);
+    if (this.blockUpdateBatchDepth > 0) {
+      this.addAffectedChunkKeys(this.pendingBlockUpdateChunks, chunkX, chunkZ, localX, localZ);
+      for (const [lightChunkX, lightChunkZ] of lightingUpdate.changedChunks) {
+        this.pendingBlockUpdateChunks.add(chunkKey(lightChunkX, lightChunkZ));
+      }
+    } else {
+      this.rebuildAffectedChunks(chunkX, chunkZ, localX, localZ, lightingUpdate.changedChunks);
+    }
     return true;
+  }
+
+  batchBlockUpdates<T>(callback: () => T): T {
+    this.blockUpdateBatchDepth += 1;
+    try {
+      return callback();
+    } finally {
+      this.blockUpdateBatchDepth -= 1;
+      if (this.blockUpdateBatchDepth === 0) this.flushBlockUpdateBatch();
+    }
   }
 
   setDaylight(daylight: number): void {
@@ -732,6 +751,16 @@ export class VoxelWorld extends THREE.Group {
     const keys = new Set<string>();
     this.addAffectedChunkKeys(keys, chunkX, chunkZ, localX, localZ);
     for (const [lightChunkX, lightChunkZ] of lightingChunks) keys.add(chunkKey(lightChunkX, lightChunkZ));
+    for (const key of keys) {
+      const chunk = this.chunks.get(key);
+      if (chunk && this.visibleChunkKeys.has(key)) this.rebuildChunk(chunk);
+    }
+  }
+
+  private flushBlockUpdateBatch(): void {
+    if (this.pendingBlockUpdateChunks.size === 0) return;
+    const keys = [...this.pendingBlockUpdateChunks];
+    this.pendingBlockUpdateChunks.clear();
     for (const key of keys) {
       const chunk = this.chunks.get(key);
       if (chunk && this.visibleChunkKeys.has(key)) this.rebuildChunk(chunk);

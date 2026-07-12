@@ -130,6 +130,28 @@ describe('VoxelWorld', () => {
     expect(world.getLightLevel(x, 60, z).block).toBe(0);
   });
 
+  it('batches block edits into one visible chunk rebuild and flushes nested updates', () => {
+    world = new VoxelWorld(107, 0, new Vector3(0.5, 60, 0.5));
+    const rebuildChunk = vi.spyOn(
+      world as unknown as { rebuildChunk: (...args: unknown[]) => void },
+      'rebuildChunk'
+    );
+
+    world.batchBlockUpdates(() => {
+      expect(world!.setBlock(2, 60, 2, BlockId.Cobblestone)).toBe(true);
+      world!.batchBlockUpdates(() => {
+        expect(world!.setBlock(3, 60, 2, BlockId.Planks)).toBe(true);
+        expect(world!.setBlock(4, 60, 2, BlockId.Bricks)).toBe(true);
+      });
+      expect(rebuildChunk).not.toHaveBeenCalled();
+    });
+
+    expect(world.getBlock(2, 60, 2)).toBe(BlockId.Cobblestone);
+    expect(world.getBlock(3, 60, 2)).toBe(BlockId.Planks);
+    expect(world.getBlock(4, 60, 2)).toBe(BlockId.Bricks);
+    expect(rebuildChunk).toHaveBeenCalledTimes(1);
+  });
+
   it('adds, removes, and batch-restores torch light without stale emitters', () => {
     world = new VoxelWorld(78);
     const x = -16;

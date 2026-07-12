@@ -4,7 +4,8 @@ import { GameAudio } from './game/audio';
 import {
   aabbsIntersect,
   blockBlocksChestLid,
-  createPlayerAabb
+  createPlayerAabb,
+  type Aabb
 } from './game/block-shapes';
 import { getBlockDefinition } from './game/blocks';
 import { calculateChargedAttack, getAttackStrength } from './game/combat';
@@ -32,6 +33,13 @@ import {
 import { BlockParticles, BlockTargetIndicator, HeldBlockView } from './game/effects';
 import { ArmorEquipment, armorSlotToIndex } from './game/equipment';
 import { getDaylight, WorldEnvironment } from './game/environment';
+import {
+  calculateExplosionDamage,
+  calculateExplosionImpact,
+  sampleExplosionExposure,
+  shouldExplosionDropSurvive,
+  traceExplosionBlocks
+} from './game/explosion';
 import { FurnaceManager, furnaceKey } from './game/furnace-manager';
 import type { FurnaceSlot, FurnaceSnapshot } from './game/furnace';
 import { InventoryActions } from './game/inventory-actions';
@@ -41,10 +49,16 @@ import {
   isBlockItem,
   toInventoryItemStack
 } from './game/inventory-ui';
-import { MobManager, type MobDrop, type MobKind } from './game/mobs';
+import {
+  MobManager,
+  type MobDrop,
+  type MobExplosionTarget,
+  type MobKind
+} from './game/mobs';
 import { PlayerController } from './game/player';
 import { createWorldSave, loadWorldSave, writeWorldSave } from './game/save';
 import {
+  BLOCK_MINING_RULES,
   MAX_HUNGER,
   TOOL_DEFINITIONS,
   SurvivalSystem,
@@ -121,6 +135,8 @@ const TORCH_DEPENDENT_OFFSETS = [
 
 const tmpDirection = new THREE.Vector3();
 const tmpPlayerPosition = new THREE.Vector3();
+const tmpExplosionOrigin = new THREE.Vector3();
+const tmpExplosionDirection = new THREE.Vector3();
 
 function isPlayerHorizontalPositionWithinWorld(
   position: readonly [number, number, number]
@@ -200,6 +216,7 @@ declare global {
       clearDrops: () => void;
       getMobCount: (kind?: MobKind) => number;
       spawnMobAhead: (kind: MobKind, distance?: number) => string;
+      explodeAt: (x: number, y: number, z: number, power?: number) => void;
       attackMob: () => boolean;
       setAttackCharge: (elapsedSeconds: number) => void;
       setTimeOfDay: (time: number) => void;
@@ -263,6 +280,7 @@ class VoxelFrontierGame {
   private previousOnGround = false;
   private readonly previousSurvivalPosition = new THREE.Vector3();
   private damageFlashTimer: number | undefined;
+  private explosionSequence = 0;
   private disposed = false;
 
   constructor(private readonly root: HTMLElement) {
@@ -349,6 +367,7 @@ class VoxelFrontierGame {
     }
 
     this.world = nextWorld;
+    this.explosionSequence = 0;
     this.scene.add(nextWorld);
     this.furnaces.load(
       save?.furnaces,
@@ -402,18 +421,16 @@ class VoxelFrontierGame {
     this.scene.add(this.worldDrops);
     this.mobs = new MobManager(this.world, seed, {
       onPlayerDamage: (amount) => {
-        if (this.inventoryMode !== 'survival') return;
-        const mitigation = this.equipment.mitigateDamage(amount);
-        const durability = this.equipment.damageFromHit(amount);
-        if (durability.broken.length > 0) this.ui.showToast('护甲损坏了', 'warning');
-        if (durability.changed) this.syncSurvivalUI();
-        this.survival.takeDamage(mitigation.appliedDamage, 'generic');
+        this.damagePlayer(amount, 'generic');
       },
       onDrop: (drop, position) => this.collectMobDrop(drop, position),
       onMobHurt: (kind, position, killed) => {
         this.audio.playMobHurt(kind, killed);
         this.particles.spawn(position.clone().floor(), getMobParticleColor(kind));
-      }
+      },
+      canTargetPlayer: () => this.inventoryMode === 'survival' && !this.survival.dead,
+      onCreeperPrime: () => this.audio.playCreeperPrime(),
+      onCreeperExplode: (position, power) => this.handleCreeperExplosion(position, power)
     });
     this.scene.add(this.mobs);
     const settings = this.ui.getSettings();
@@ -1206,6 +1223,134 @@ class VoxelFrontierGame {
     return true;
   }
 
+  private damagePlayer(amount: number, source: DamageSource): number {
+    const incomingDamage = Math.max(0, Number.isFinite(amount) ? amount : 0);
+    if (
+      incomingDamage <= 0 ||
+      this.inventoryMode !== 'survival' ||
+      this.survival.dead
+    ) {
+      return 0;
+    }
+    const mitigation = this.equipment.mitigateDamage(incomingDamage);
+    const durability = this.equipment.damageFromHit(incomingDamage);
+    if (durability.broken.length > 0) this.ui.showToast('护甲损坏了', 'warning');
+    if (durability.changed) this.syncSurvivalUI();
+    return this.survival.takeDamage(mitigation.appliedDamage, source);
+  }
+
+  private handleCreeperExplosion(position: THREE.Vector3, power: number): void {
+    const safePower = Math.max(0.1, Math.min(16, Number.isFinite(power) ? power : 3));
+    const center = position.clone();
+    this.audio.playExplosion();
+    const visualCenter = center.clone();
+    visualCenter.y += 0.55;
+    this.particles.spawnExplosion(visualCenter, safePower);
+    const sequence = this.explosionSequence++;
+    const explosionSeed = (
+      this.world.seed ^
+      Math.imul(Math.floor(center.x * 16), 0x45d9f3b) ^
+      Math.imul(Math.floor(center.y * 16), 0x119de1f3) ^
+      Math.imul(Math.floor(center.z * 16), 0x3449f5) ^
+      Math.imul(sequence + 1, 0x27d4eb2d)
+    ) | 0;
+    const affectedBlocks = traceExplosionBlocks({
+      center,
+      power: safePower,
+      seed: explosionSeed,
+      getBlock: (x, y, z) => this.world.getBlock(x, y, z)
+    });
+
+    const playerPosition = this.player.getPosition(new THREE.Vector3());
+    const playerDistance = playerPosition.distanceTo(center);
+    const playerExposure = this.getExplosionExposure(center, createPlayerAabb(playerPosition));
+    const playerImpact = calculateExplosionImpact(playerDistance, playerExposure, safePower);
+    const playerDamage = calculateExplosionDamage(playerDistance, playerExposure, safePower);
+
+    const mobImpactCache = new Map<string, { damage: number; impact: number }>();
+    const resolveMobImpact = (target: MobExplosionTarget): { damage: number; impact: number } => {
+      const cached = mobImpactCache.get(target.id);
+      if (cached) return cached;
+      const bounds: Aabb = {
+        minX: target.position.x - target.radius,
+        minY: target.position.y,
+        minZ: target.position.z - target.radius,
+        maxX: target.position.x + target.radius,
+        maxY: target.position.y + target.height,
+        maxZ: target.position.z + target.radius
+      };
+      const exposure = this.getExplosionExposure(center, bounds);
+      const result = {
+        damage: calculateExplosionDamage(target.distance, exposure, safePower),
+        impact: calculateExplosionImpact(target.distance, exposure, safePower)
+      };
+      mobImpactCache.set(target.id, result);
+      return result;
+    };
+    this.mobs.damageMobsInExplosion(
+      center,
+      safePower * 2,
+      (target) => resolveMobImpact(target).damage,
+      (target) => resolveMobImpact(target).impact
+    );
+
+    if (this.inventoryMode === 'survival' && !this.survival.dead) {
+      if (playerImpact > 0) {
+        tmpExplosionDirection.set(
+          playerPosition.x - center.x,
+          this.camera.position.y - center.y,
+          playerPosition.z - center.z
+        );
+        if (tmpExplosionDirection.lengthSq() > Number.EPSILON) {
+          this.player.velocity.addScaledVector(
+            tmpExplosionDirection.normalize(),
+            playerImpact * 7
+          );
+        }
+      }
+      this.damagePlayer(playerDamage, 'explosion');
+    }
+
+    const pendingDrops: Array<{ stack: ItemStack; position: THREE.Vector3 }> = [];
+    this.world.batchBlockUpdates(() => {
+      for (const block of affectedBlocks) {
+        if (this.world.getBlock(block.x, block.y, block.z) !== block.id) continue;
+        const rule = BLOCK_MINING_RULES[block.id];
+        const drop = rule.drop;
+        const shouldDrop = this.inventoryMode === 'survival' &&
+          drop !== undefined &&
+          shouldExplosionDropSurvive(block.x, block.y, block.z, safePower, explosionSeed);
+        if (!this.replaceWorldBlock(block.x, block.y, block.z, BlockId.Air)) continue;
+        if (shouldDrop && drop) {
+          pendingDrops.push({
+            stack: { item: drop.item, count: drop.count },
+            position: new THREE.Vector3(block.x + 0.5, block.y + 0.5, block.z + 0.5)
+          });
+        }
+      }
+    });
+    for (const drop of pendingDrops) {
+      this.worldDrops.spawn(drop.stack, drop.position, { pickupDelay: 0.5 });
+    }
+
+    this.resetMining();
+  }
+
+  private getExplosionExposure(center: THREE.Vector3, bounds: Aabb): number {
+    return sampleExplosionExposure(center, bounds, (sample, explosionCenter) => {
+      tmpExplosionOrigin.set(sample.x, sample.y, sample.z);
+      tmpExplosionDirection.set(
+        explosionCenter.x - sample.x,
+        explosionCenter.y - sample.y,
+        explosionCenter.z - sample.z
+      );
+      const distance = tmpExplosionDirection.length();
+      if (distance <= Number.EPSILON) return true;
+      const hit = this.world.raycast(tmpExplosionOrigin, tmpExplosionDirection, distance);
+      return hit === null || hit.distance >= distance - 1e-4;
+    });
+  }
+
   private showChestPlacementWarning(reason: ChestPlacementRejectionReason): void {
     const message: Record<ChestPlacementRejectionReason, string> = {
       occupied: '这里已经有箱子了',
@@ -1981,7 +2126,7 @@ class VoxelFrontierGame {
       this.syncChestVisuals(daylight, playerPosition);
     }
     this.environment.update(this.timeOfDay, ambientActive ? dt : 0, playerPosition);
-    this.particles.update(this.mode === 'playing' ? dt : 0);
+    this.particles.update(this.mode === 'playing' || this.mode === 'dead' ? dt : 0);
     if (this.mode === 'playing') {
       this.heldBlock.update(dt, this.player.horizontalSpeed, this.player.onGround);
     }
@@ -2161,7 +2306,7 @@ class VoxelFrontierGame {
         const safeDistance = Math.max(0.75, Math.min(4, Number.isFinite(distance) ? distance : 3));
         const direction = this.camera.getWorldDirection(new THREE.Vector3());
         const position = this.camera.position.clone().addScaledVector(direction, safeDistance);
-        const halfHeight = kind === 'zombie'
+        const halfHeight = kind === 'zombie' || kind === 'creeper'
           ? 0.91
           : kind === 'cow'
             ? 0.7
@@ -2170,6 +2315,10 @@ class VoxelFrontierGame {
               : 0.55;
         position.y -= halfHeight;
         return this.mobs.spawnMob(kind, position);
+      },
+      explodeAt: (x, y, z, power = 3) => {
+        if (![x, y, z, power].every(Number.isFinite)) return;
+        this.handleCreeperExplosion(new THREE.Vector3(x, y, z), power);
       },
       attackMob: () => this.tryAttackMob(),
       setAttackCharge: (elapsedSeconds) => {
@@ -2333,6 +2482,7 @@ function getMobParticleColor(kind: MobKind): string {
   if (kind === 'pig') return '#d9959f';
   if (kind === 'sheep') return '#e7e2d4';
   if (kind === 'cow') return '#70452d';
+  if (kind === 'creeper') return '#55a84d';
   return '#5f8f4e';
 }
 
@@ -2341,6 +2491,7 @@ function getMobParticleColorForDrop(drop: MobDrop): string {
   if (drop.item === 'leather') return '#8b572f';
   if (drop.item === 'raw_beef') return '#a94f4b';
   if (drop.item === 'rotten_flesh') return '#81643d';
+  if (drop.item === 'gunpowder') return '#454640';
   return '#b96d73';
 }
 
@@ -2348,6 +2499,7 @@ function getDeathMessage(source: DamageSource | null): string {
   if (source === 'fall') return '你从高处摔了下来';
   if (source === 'drowning') return '你没能及时浮出水面';
   if (source === 'starvation') return '你饿死了';
+  if (source === 'explosion') return '你在爆炸中倒下了';
   return '你的生命耗尽了';
 }
 

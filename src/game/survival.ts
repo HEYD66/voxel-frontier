@@ -13,13 +13,14 @@ const DROWNING_DAMAGE_INTERVAL = 1;
 const AIR_RECOVERY_PER_SECOND = 5;
 const PASSIVE_EXHAUSTION_PER_SECOND = 0.002;
 
-export type DamageSource = 'fall' | 'drowning' | 'starvation' | 'generic';
+export type DamageSource = 'fall' | 'drowning' | 'starvation' | 'explosion' | 'generic';
 export type HealSource = 'natural' | 'food' | 'respawn' | 'generic';
 export type ToolKind = 'pickaxe' | 'axe' | 'shovel' | 'sword';
 export type ToolTier = 'wood' | 'stone' | 'iron' | 'diamond';
 export type ArmorSlot = 'head' | 'chest' | 'legs' | 'feet';
 export type ResourceItemId =
   | 'coal'
+  | 'gunpowder'
   | 'raw_iron'
   | 'iron_ingot'
   | 'diamond'
@@ -957,6 +958,7 @@ const TOOL_ITEM_ID_SET = new Set<string>(Object.values(TOOL_ITEM_IDS));
 const ARMOR_ITEM_ID_SET = new Set<string>(Object.values(ARMOR_ITEM_IDS));
 const RESOURCE_ITEM_ID_SET = new Set<string>([
   'coal',
+  'gunpowder',
   'raw_iron',
   'iron_ingot',
   'diamond',
@@ -1108,7 +1110,11 @@ function clampFinite(value: number, minimum: number, maximum: number, fallback: 
 }
 
 function isDamageSource(value: unknown): value is DamageSource {
-  return value === 'fall' || value === 'drowning' || value === 'starvation' || value === 'generic';
+  return value === 'fall' ||
+    value === 'drowning' ||
+    value === 'starvation' ||
+    value === 'explosion' ||
+    value === 'generic';
 }
 
 function vitalsEqual(left: SurvivalVitals, right: SurvivalVitals): boolean {

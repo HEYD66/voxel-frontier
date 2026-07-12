@@ -79,6 +79,18 @@ describe('ItemInventory', () => {
     expect(isItemId('diamond')).toBe(true);
   });
 
+  it('accepts gunpowder as a stackable resource item', () => {
+    const inventory = new ItemInventory(2);
+
+    expect(isItemId('gunpowder')).toBe(true);
+    expect(getItemStackLimit('gunpowder')).toBe(64);
+    expect(inventory.add('gunpowder', 65)).toBe(0);
+    expect(inventory.getSnapshot().slots).toEqual([
+      { item: 'gunpowder', count: 64 },
+      { item: 'gunpowder', count: 1 }
+    ]);
+  });
+
   it('creates every sword at full durability with authoritative melee damage', () => {
     const swords = [
       {
@@ -493,6 +505,18 @@ describe('mining and drops', () => {
 });
 
 describe('SurvivalSystem vitals', () => {
+  it('records explosion as the death source', () => {
+    const survival = new SurvivalSystem();
+
+    expect(survival.takeDamage(MAX_HEALTH, 'explosion')).toBe(MAX_HEALTH);
+    expect(survival.dead).toBe(true);
+    expect(survival.deathCause).toBe('explosion');
+    const restored = new SurvivalSystem({ snapshot: survival.getSnapshot() });
+    expect(restored.deathCause).toBe('explosion');
+    restored.dispose();
+    survival.dispose();
+  });
+
   it('regenerates from high hunger and converts exhaustion into saturation loss', () => {
     const survival = new SurvivalSystem({ snapshot: snapshot({ health: 16 }) });
 

@@ -392,6 +392,34 @@ describe('world save survival compatibility', () => {
     ]);
   });
 
+  it('sanitizes gunpowder in inventory, cursor, and persisted world drops', () => {
+    localStorage.setItem(WORLD_SAVE_KEY, JSON.stringify({
+      ...baseSave(),
+      survival: survivalSnapshot({
+        inventory: { slots: [{ item: 'gunpowder', count: 80 }] }
+      }),
+      cursor: { item: 'gunpowder', count: 5 },
+      drops: [{
+        stack: { item: 'gunpowder', count: 90 },
+        position: [2, 3, 4],
+        velocity: [0.1, 0.2, 0.3],
+        age: 1,
+        pickupDelay: 0.25
+      }]
+    }));
+
+    const loaded = loadWorldSave();
+    expect(loaded?.survival?.inventory.slots).toEqual([{ item: 'gunpowder', count: 64 }]);
+    expect(loaded?.cursor).toEqual({ item: 'gunpowder', count: 5 });
+    expect(loaded?.drops).toEqual([{
+      stack: { item: 'gunpowder', count: 64 },
+      position: [2, 3, 4],
+      velocity: [0.1, 0.2, 0.3],
+      age: 1,
+      pickupDelay: 0.25
+    }]);
+  });
+
   it('sanitizes and round-trips beef, leather, and leather armor', () => {
     localStorage.setItem(WORLD_SAVE_KEY, JSON.stringify({
       ...baseSave(),

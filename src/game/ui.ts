@@ -210,6 +210,7 @@ const ITEM_LABELS: Record<string, string> = {
   diamond_leggings: '钻石护腿',
   diamond_boots: '钻石靴子',
   coal: '煤炭',
+  gunpowder: '火药',
   raw_iron: '粗铁',
   iron_ingot: '铁锭',
   stick: '木棍',
@@ -2458,6 +2459,7 @@ function inferItemIcon(stack: InventoryItemStack): InventoryItemIcon {
   if (id.includes('bucket')) return 'bucket';
   if (
     id === 'coal' ||
+    id === 'gunpowder' ||
     id === 'raw_iron' ||
     id === 'iron_ingot' ||
     id === 'diamond' ||

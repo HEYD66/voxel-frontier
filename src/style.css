@@ -2187,6 +2187,37 @@ input[type="range"]::-moz-range-thumb {
   box-shadow: inset 5px 4px 0 #4a5052;
 }
 
+.item-gunpowder {
+  background: transparent;
+  clip-path: none;
+  box-shadow: none;
+}
+
+.item-gunpowder::before {
+  top: 5px;
+  left: 7px;
+  width: 7px;
+  height: 7px;
+  background: #343531;
+  box-shadow:
+    10px 2px 0 #5b5a52,
+    -2px 10px 0 #494a45,
+    10px 11px 0 #292a28,
+    4px 18px 0 #68675e;
+  transform: rotate(8deg);
+}
+
+.item-gunpowder::after {
+  top: 15px;
+  left: 16px;
+  width: 4px;
+  height: 4px;
+  background: #838176;
+  box-shadow:
+    -7px -2px 0 #5d5c55,
+    6px -7px 0 #252624;
+}
+
 .item-raw_iron {
   --item-tint: #ad7c62;
   box-shadow: inset 6px 4px 0 #d0a083;

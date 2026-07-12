@@ -1,15 +1,38 @@
 import * as THREE from 'three';
+import {
+  CREEPER_CANCEL_DISTANCE,
+  CREEPER_EXPLOSION_POWER,
+  CREEPER_FUSE_SECONDS,
+  CREEPER_IGNITE_DISTANCE
+} from './explosion';
 import { BlockId } from './types';
 import {
   WORLD_HEIGHT,
   type VoxelWorld
 } from './world';
 
-export type MobKind = 'pig' | 'sheep' | 'cow' | 'zombie';
+export type MobKind = 'pig' | 'sheep' | 'cow' | 'zombie' | 'creeper';
 
 export interface MobDrop {
-  item: 'raw_pork' | 'raw_mutton' | 'raw_beef' | 'leather' | 'wool' | 'rotten_flesh';
+  item:
+    | 'raw_pork'
+    | 'raw_mutton'
+    | 'raw_beef'
+    | 'leather'
+    | 'wool'
+    | 'rotten_flesh'
+    | 'gunpowder';
   count: number;
+}
+
+export interface MobExplosionTarget {
+  id: string;
+  kind: MobKind;
+  position: THREE.Vector3;
+  center: THREE.Vector3;
+  distance: number;
+  radius: number;
+  height: number;
 }
 
 export interface MobAttackResult {
@@ -34,6 +57,9 @@ export interface MobManagerCallbacks {
   onPlayerDamage?: (amount: number, source: MobKind) => void;
   onDrop?: (drop: MobDrop, position: THREE.Vector3) => void;
   onMobHurt?: (kind: MobKind, position: THREE.Vector3, killed: boolean) => void;
+  canTargetPlayer?: () => boolean;
+  onCreeperPrime?: (position: THREE.Vector3) => void;
+  onCreeperExplode?: (position: THREE.Vector3, power: number) => void;
 }
 
 interface MobDefinition {
@@ -60,6 +86,9 @@ interface MobEntity {
   burnAccumulator: number;
   walkPhase: number;
   onGround: boolean;
+  fuseTimer: number;
+  fusePrimed: boolean;
+  flashParts: THREE.Mesh[];
 }
 
 interface MobRayIntersection {
@@ -72,7 +101,8 @@ const MOB_DEFINITIONS: Record<MobKind, MobDefinition> = {
   pig: { health: 10, speed: 1.25, radius: 0.42, height: 1.1, hostile: false },
   sheep: { health: 8, speed: 1.12, radius: 0.43, height: 1.25, hostile: false },
   cow: { health: 10, speed: 1.15, radius: 0.45, height: 1.4, hostile: false },
-  zombie: { health: 20, speed: 1.55, radius: 0.31, height: 1.82, hostile: true }
+  zombie: { health: 20, speed: 1.55, radius: 0.31, height: 1.82, hostile: true },
+  creeper: { health: 20, speed: 1.42, radius: 0.36, height: 1.82, hostile: true }
 };
 
 const GRAVITY = 22;
@@ -88,6 +118,9 @@ const tmpHitPoint = new THREE.Vector3();
 const tmpBox = new THREE.Box3();
 const tmpMin = new THREE.Vector3();
 const tmpMax = new THREE.Vector3();
+const tmpLineStart = new THREE.Vector3();
+const tmpLineEnd = new THREE.Vector3();
+const tmpLinePoint = new THREE.Vector3();
 
 function seededRandom(seed: number): () => number {
   let state = seed >>> 0;
@@ -108,7 +141,9 @@ function rotateToward(current: number, target: number, amount: number): number {
   return current + delta * Math.min(1, amount);
 }
 
-export function selectPassiveMobKind(randomValue: number): Exclude<MobKind, 'zombie'> {
+export function selectPassiveMobKind(
+  randomValue: number
+): Exclude<MobKind, 'zombie' | 'creeper'> {
   const roll = THREE.MathUtils.clamp(Number.isFinite(randomValue) ? randomValue : 0, 0, 1);
   if (roll < 12 / 30) return 'sheep';
   if (roll < 22 / 30) return 'pig';
@@ -145,17 +180,24 @@ export class MobManager extends THREE.Group {
     if (!this.initialized) {
       this.initialized = true;
       for (let i = 0; i < 5; i += 1) this.trySpawnPassive(playerPosition);
-      for (let i = 0; i < 2; i += 1) this.trySpawnZombie(playerPosition, daylight);
+      if (this.getCount('zombie') + this.getCount('creeper') < MAX_HOSTILE_MOBS) {
+        this.trySpawnZombie(playerPosition, daylight);
+      }
+      if (this.getCount('zombie') + this.getCount('creeper') < MAX_HOSTILE_MOBS) {
+        this.trySpawnCreeper(playerPosition, daylight);
+      }
     }
 
     this.spawnTimer -= safeDt;
     if (this.spawnTimer <= 0) {
       this.spawnTimer = 2.5;
       const passiveCount = this.getCount('pig') + this.getCount('sheep') + this.getCount('cow');
-      const zombieCount = this.getCount('zombie');
+      const hostileCount = this.getCount('zombie') + this.getCount('creeper');
       if (passiveCount < MAX_PASSIVE_MOBS && daylight > 0.22) this.trySpawnPassive(playerPosition);
-      if (zombieCount < MAX_HOSTILE_MOBS) this.trySpawnZombie(playerPosition, daylight);
+      if (hostileCount < MAX_HOSTILE_MOBS) this.trySpawnHostile(playerPosition, daylight);
     }
+
+    const canTargetPlayer = this.callbacks.canTargetPlayer?.() ?? true;
 
     for (let index = this.mobs.length - 1; index >= 0; index -= 1) {
       const mob = this.mobs[index];
@@ -165,7 +207,7 @@ export class MobManager extends THREE.Group {
         this.removeMob(mob);
         continue;
       }
-      this.updateMob(mob, safeDt, playerPosition, daylight, distanceToPlayer);
+      this.updateMob(mob, safeDt, playerPosition, daylight, distanceToPlayer, canTargetPlayer);
     }
   }
 
@@ -173,6 +215,9 @@ export class MobManager extends THREE.Group {
     const definition = MOB_DEFINITIONS[kind];
     const group = new THREE.Group();
     const legs = this.createModel(kind, group);
+    const flashParts = group.children.filter(
+      (child): child is THREE.Mesh => child instanceof THREE.Mesh && child.name === 'Creeper flash overlay'
+    );
     const id = `${kind}-${this.nextId++}`;
     group.name = id;
     group.position.copy(position);
@@ -192,7 +237,10 @@ export class MobManager extends THREE.Group {
       lastDamageTaken: 0,
       burnAccumulator: 0,
       walkPhase: this.random() * Math.PI * 2,
-      onGround: false
+      onGround: false,
+      fuseTimer: 0,
+      fusePrimed: false,
+      flashParts
     });
     return id;
   }
@@ -205,53 +253,72 @@ export class MobManager extends THREE.Group {
   ): MobAttackResult | null {
     const hit = this.findClosestRayIntersection(origin, direction, maximumDistance);
     if (!hit) return null;
-    const closest = hit.mob;
-    const incomingDamage = Math.max(0, Number.isFinite(damage) ? damage : 0);
-    const immunityActive = closest.damageImmunityTimer > 0;
-    if (incomingDamage <= 0 || (immunityActive && incomingDamage <= closest.lastDamageTaken)) {
+    return this.damageMob(
+      hit.mob,
+      damage,
+      hit.direction.x * 4.2,
+      2.8,
+      hit.direction.z * 4.2
+    );
+  }
+
+  damageMobsInExplosion(
+    center: THREE.Vector3,
+    radius: number,
+    getDamage: (target: MobExplosionTarget) => number,
+    getImpact?: (target: MobExplosionTarget) => number
+  ): MobAttackResult[] {
+    const safeRadius = Math.max(0, Number.isFinite(radius) ? radius : 0);
+    if (safeRadius <= 0) return [];
+
+    const targets = this.mobs.map((mob) => {
+      const definition = MOB_DEFINITIONS[mob.kind];
+      const mobCenter = mob.group.position.clone();
+      mobCenter.y += definition.height / 2;
       return {
-        id: closest.id,
-        kind: closest.kind,
-        damage: 0,
-        remainingHealth: closest.health,
-        killed: false,
-        blocked: true,
-        drops: [],
-        position: closest.group.position.clone()
+        mob,
+        target: {
+          id: mob.id,
+          kind: mob.kind,
+          position: mob.group.position.clone(),
+          center: mobCenter,
+          distance: mob.group.position.distanceTo(center),
+          radius: definition.radius,
+          height: definition.height
+        } satisfies MobExplosionTarget
       };
+    }).filter(({ target }) => target.distance <= safeRadius)
+      .sort((a, b) => a.target.distance - b.target.distance || a.target.id.localeCompare(b.target.id));
+
+    const results: MobAttackResult[] = [];
+    for (const { mob, target } of targets) {
+      if (!this.mobs.includes(mob)) continue;
+      const cloneTarget = (): MobExplosionTarget => ({
+        ...target,
+        position: target.position.clone(),
+        center: target.center.clone()
+      });
+      const damage = getDamage(cloneTarget());
+      const horizontalX = target.position.x - center.x;
+      const horizontalZ = target.position.z - center.z;
+      const horizontalLength = Math.hypot(horizontalX, horizontalZ);
+      const distanceImpact = THREE.MathUtils.clamp(1 - target.distance / safeRadius, 0, 1);
+      const requestedImpact = getImpact?.(cloneTarget()) ?? distanceImpact;
+      const impact = THREE.MathUtils.clamp(
+        Number.isFinite(requestedImpact) ? requestedImpact : 0,
+        0,
+        1
+      );
+      const knockback = impact * 7;
+      results.push(this.damageMob(
+        mob,
+        damage,
+        horizontalLength > Number.EPSILON ? horizontalX / horizontalLength * knockback : 0,
+        impact * 5,
+        horizontalLength > Number.EPSILON ? horizontalZ / horizontalLength * knockback : 0
+      ));
     }
-    const appliedDamage = immunityActive
-      ? incomingDamage - closest.lastDamageTaken
-      : incomingDamage;
-    closest.lastDamageTaken = incomingDamage;
-    if (!immunityActive) closest.damageImmunityTimer = MOB_DAMAGE_IMMUNITY_SECONDS;
-    closest.health = Math.max(0, closest.health - appliedDamage);
-    if (!immunityActive) {
-      closest.hurtTimer = 0.26;
-      closest.velocity.x += hit.direction.x * 4.2;
-      closest.velocity.y = Math.max(closest.velocity.y, 2.8);
-      closest.velocity.z += hit.direction.z * 4.2;
-    }
-    const killed = closest.health <= 0;
-    const drops = killed ? this.rollDrops(closest.kind) : [];
-    const result: MobAttackResult = {
-      id: closest.id,
-      kind: closest.kind,
-      damage: appliedDamage,
-      remainingHealth: closest.health,
-      killed,
-      blocked: false,
-      drops,
-      position: closest.group.position.clone()
-    };
-    if (!immunityActive || killed) {
-      this.callbacks.onMobHurt?.(closest.kind, result.position.clone(), killed);
-    }
-    if (killed) {
-      for (const drop of drops) this.callbacks.onDrop?.(drop, result.position.clone());
-      this.removeMob(closest);
-    }
-    return result;
+    return results;
   }
 
   raycastMob(
@@ -282,6 +349,63 @@ export class MobManager extends THREE.Group {
     this.cubeGeometry.dispose();
     for (const material of Object.values(this.materials)) material.dispose();
     this.removeFromParent();
+  }
+
+  private damageMob(
+    mob: MobEntity,
+    damage: number,
+    knockbackX: number,
+    knockbackY: number,
+    knockbackZ: number
+  ): MobAttackResult {
+    const incomingDamage = Math.max(0, Number.isFinite(damage) ? damage : 0);
+    const immunityActive = mob.damageImmunityTimer > 0;
+    if (incomingDamage <= 0 || (immunityActive && incomingDamage <= mob.lastDamageTaken)) {
+      return {
+        id: mob.id,
+        kind: mob.kind,
+        damage: 0,
+        remainingHealth: mob.health,
+        killed: false,
+        blocked: true,
+        drops: [],
+        position: mob.group.position.clone()
+      };
+    }
+
+    const appliedDamage = immunityActive
+      ? incomingDamage - mob.lastDamageTaken
+      : incomingDamage;
+    mob.lastDamageTaken = incomingDamage;
+    if (!immunityActive) mob.damageImmunityTimer = MOB_DAMAGE_IMMUNITY_SECONDS;
+    mob.health = Math.max(0, mob.health - appliedDamage);
+    if (!immunityActive) {
+      mob.hurtTimer = 0.26;
+      mob.velocity.x += Number.isFinite(knockbackX) ? knockbackX : 0;
+      mob.velocity.y = Math.max(mob.velocity.y, Number.isFinite(knockbackY) ? knockbackY : 0);
+      mob.velocity.z += Number.isFinite(knockbackZ) ? knockbackZ : 0;
+    }
+
+    const killed = mob.health <= 0;
+    const drops = killed ? this.rollDrops(mob.kind) : [];
+    const result: MobAttackResult = {
+      id: mob.id,
+      kind: mob.kind,
+      damage: appliedDamage,
+      remainingHealth: mob.health,
+      killed,
+      blocked: false,
+      drops,
+      position: mob.group.position.clone()
+    };
+    if (!immunityActive || killed) {
+      this.callbacks.onMobHurt?.(mob.kind, result.position.clone(), killed);
+    }
+    if (killed) {
+      for (const drop of drops) this.callbacks.onDrop?.(drop, result.position.clone());
+      this.removeMob(mob);
+    }
+    return result;
   }
 
   private findClosestRayIntersection(
@@ -333,7 +457,8 @@ export class MobManager extends THREE.Group {
     dt: number,
     playerPosition: THREE.Vector3,
     daylight: number,
-    distanceToPlayer: number
+    distanceToPlayer: number,
+    canTargetPlayer: boolean
   ): void {
     const definition = MOB_DEFINITIONS[mob.kind];
     mob.attackCooldown = Math.max(0, mob.attackCooldown - dt);
@@ -343,7 +468,6 @@ export class MobManager extends THREE.Group {
     if (previousDamageImmunity > 0 && mob.damageImmunityTimer === 0) {
       mob.lastDamageTaken = 0;
     }
-    mob.group.scale.setScalar(mob.hurtTimer > 0 ? 1.06 : 1);
     mob.wanderTimer -= dt;
 
     if (mob.kind === 'zombie' && daylight > 0.72 && this.hasOpenSky(mob.group.position)) {
@@ -365,16 +489,56 @@ export class MobManager extends THREE.Group {
       mob.burnAccumulator = 0;
     }
 
+    if (mob.kind === 'creeper') {
+      const verticalDistance = Math.abs(playerPosition.y - mob.group.position.y);
+      const canSeePlayer = canTargetPlayer &&
+        verticalDistance < 2.5 &&
+        distanceToPlayer <= CREEPER_CANCEL_DISTANCE &&
+        this.hasLineOfSightToPlayer(mob, playerPosition);
+      if (
+        !mob.fusePrimed &&
+        canSeePlayer &&
+        distanceToPlayer <= CREEPER_IGNITE_DISTANCE
+      ) {
+        mob.fusePrimed = true;
+        mob.velocity.x = 0;
+        mob.velocity.z = 0;
+        this.callbacks.onCreeperPrime?.(mob.group.position.clone());
+      }
+      if (mob.fusePrimed) {
+        if (canSeePlayer) {
+          mob.fuseTimer = Math.min(CREEPER_FUSE_SECONDS, mob.fuseTimer + dt);
+        } else {
+          mob.fuseTimer = Math.max(0, mob.fuseTimer - dt * 2);
+          if (mob.fuseTimer <= 0) mob.fusePrimed = false;
+        }
+        if (mob.fuseTimer >= CREEPER_FUSE_SECONDS) {
+          const explosionPosition = mob.group.position.clone();
+          this.removeMob(mob);
+          this.callbacks.onCreeperExplode?.(explosionPosition, CREEPER_EXPLOSION_POWER);
+          return;
+        }
+      }
+    }
+
+    this.updateMobScaleAndFlash(mob);
+
     let desiredX = 0;
     let desiredZ = 0;
     let desiredSpeed = definition.speed;
-    if (mob.kind === 'zombie' && distanceToPlayer < 18) {
+    if (
+      definition.hostile &&
+      canTargetPlayer &&
+      distanceToPlayer < 18 &&
+      !(mob.kind === 'creeper' && mob.fusePrimed)
+    ) {
       desiredX = playerPosition.x - mob.group.position.x;
       desiredZ = playerPosition.z - mob.group.position.z;
       const length = Math.hypot(desiredX, desiredZ) || 1;
       desiredX /= length;
       desiredZ /= length;
       if (
+        mob.kind === 'zombie' &&
         distanceToPlayer < 1.25 &&
         Math.abs(playerPosition.y - mob.group.position.y) < 1.5 &&
         mob.attackCooldown <= 0
@@ -382,6 +546,8 @@ export class MobManager extends THREE.Group {
         mob.attackCooldown = 1.15;
         this.callbacks.onPlayerDamage?.(2, mob.kind);
       }
+    } else if (mob.kind === 'creeper' && mob.fusePrimed) {
+      desiredSpeed = 0;
     } else {
       if (mob.wanderTimer <= 0) {
         mob.wanderTimer = 1.6 + this.random() * 3.8;
@@ -413,6 +579,46 @@ export class MobManager extends THREE.Group {
     mob.legs.forEach((leg, index) => {
       leg.rotation.x = legSwing * getMobLegSwingDirection(index, mob.legs.length);
     });
+  }
+
+  private updateMobScaleAndFlash(mob: MobEntity): void {
+    const hurtScale = mob.hurtTimer > 0 ? 1.06 : 1;
+    if (mob.kind !== 'creeper') {
+      mob.group.scale.setScalar(hurtScale);
+      return;
+    }
+
+    const progress = THREE.MathUtils.clamp(mob.fuseTimer / CREEPER_FUSE_SECONDS, 0, 1);
+    const pulse = 1 + Math.sin(progress * progress * Math.PI * 18) * progress * 0.025;
+    mob.group.scale.set(
+      hurtScale * pulse * (1 + progress * 0.18),
+      hurtScale / pulse * (1 + progress * 0.08),
+      hurtScale * pulse * (1 + progress * 0.18)
+    );
+    const flashStep = Math.floor(mob.fuseTimer * 4 + progress * progress * 14);
+    const showFlash = mob.fusePrimed && mob.fuseTimer > 0.12 && flashStep % 2 === 1;
+    for (const part of mob.flashParts) part.visible = showFlash;
+  }
+
+  private hasLineOfSightToPlayer(mob: MobEntity, playerPosition: THREE.Vector3): boolean {
+    tmpLineStart.copy(mob.group.position);
+    tmpLineStart.y += MOB_DEFINITIONS[mob.kind].height * 0.82;
+    tmpLineEnd.copy(playerPosition);
+    tmpLineEnd.y += 1.62;
+    const distance = tmpLineStart.distanceTo(tmpLineEnd);
+    if (distance <= Number.EPSILON) return true;
+    const steps = Math.max(1, Math.ceil(distance / 0.18));
+    for (let step = 1; step < steps; step += 1) {
+      tmpLinePoint.lerpVectors(tmpLineStart, tmpLineEnd, step / steps);
+      if (this.world.isSolid(
+        Math.floor(tmpLinePoint.x),
+        Math.floor(tmpLinePoint.y),
+        Math.floor(tmpLinePoint.z)
+      )) {
+        return false;
+      }
+    }
+    return true;
   }
 
   private moveHorizontal(mob: MobEntity, axis: 'x' | 'z', amount: number): void {
@@ -492,6 +698,15 @@ export class MobManager extends THREE.Group {
     this.trySpawn('zombie', playerPosition, 12, 34, daylight);
   }
 
+  private trySpawnCreeper(playerPosition: THREE.Vector3, daylight: number): void {
+    this.trySpawn('creeper', playerPosition, 12, 34, daylight);
+  }
+
+  private trySpawnHostile(playerPosition: THREE.Vector3, daylight: number): void {
+    if (this.random() < 0.68) this.trySpawnZombie(playerPosition, daylight);
+    else this.trySpawnCreeper(playerPosition, daylight);
+  }
+
   private trySpawn(
     kind: MobKind,
     playerPosition: THREE.Vector3,
@@ -504,7 +719,7 @@ export class MobManager extends THREE.Group {
       const radius = minimumRadius + this.random() * (maximumRadius - minimumRadius);
       const x = Math.floor(playerPosition.x + Math.cos(angle) * radius) + 0.5;
       const z = Math.floor(playerPosition.z + Math.sin(angle) * radius) + 0.5;
-      const y = kind === 'zombie'
+      const y = MOB_DEFINITIONS[kind].hostile
         ? this.findHostileSpawnHeight(x, z, daylight)
         : this.findSpawnHeight(x, z);
       if (y === null) continue;
@@ -597,6 +812,12 @@ export class MobManager extends THREE.Group {
       if (leatherCount > 0) drops.push({ item: 'leather', count: leatherCount });
       return drops;
     }
+    if (kind === 'creeper') {
+      const gunpowderCount = Math.floor(this.random() * 3);
+      return gunpowderCount > 0
+        ? [{ item: 'gunpowder', count: gunpowderCount }]
+        : [];
+    }
     return this.random() < 0.8
       ? [{ item: 'rotten_flesh', count: 1 + Math.floor(this.random() * 2) }]
       : [];
@@ -622,6 +843,16 @@ export class MobManager extends THREE.Group {
       zombieSkin: new THREE.MeshLambertMaterial({ color: '#5c8a57' }),
       zombieShirt: new THREE.MeshLambertMaterial({ color: '#487f83' }),
       zombiePants: new THREE.MeshLambertMaterial({ color: '#444d74' }),
+      creeperSkin: new THREE.MeshLambertMaterial({ color: '#58a84f' }),
+      creeperLight: new THREE.MeshLambertMaterial({ color: '#75be61' }),
+      creeperDark: new THREE.MeshLambertMaterial({ color: '#2f6838' }),
+      creeperFace: new THREE.MeshLambertMaterial({ color: '#172f21' }),
+      creeperFlash: new THREE.MeshLambertMaterial({
+        color: '#e7f3dd',
+        transparent: true,
+        opacity: 0.78,
+        depthWrite: false
+      }),
       eye: new THREE.MeshLambertMaterial({ color: '#171717' })
     };
   }
@@ -729,6 +960,98 @@ export class MobManager extends THREE.Group {
         this.materials.cowDark!
       );
       legs.forEach((leg, index) => { leg.name = `Cow leg ${index + 1}`; });
+      return legs;
+    }
+
+    if (kind === 'creeper') {
+      const body = this.createPart(
+        group,
+        [0.58, 0.82, 0.42],
+        [0, 0.92, 0],
+        this.materials.creeperSkin!
+      );
+      body.name = 'Creeper body';
+      const head = this.createPart(
+        group,
+        [0.7, 0.7, 0.7],
+        [0, 1.5, 0],
+        this.materials.creeperSkin!
+      );
+      head.name = 'Creeper head';
+      const chestPatch = this.createPart(
+        group,
+        [0.22, 0.36, 0.025],
+        [-0.13, 0.96, -0.222],
+        this.materials.creeperLight!
+      );
+      chestPatch.name = 'Creeper chest patch';
+      const sidePatch = this.createPart(
+        group,
+        [0.025, 0.24, 0.18],
+        [0.292, 0.76, 0.08],
+        this.materials.creeperDark!
+      );
+      sidePatch.name = 'Creeper side patch';
+      const leftEye = this.createPart(
+        group,
+        [0.15, 0.14, 0.025],
+        [-0.18, 1.62, -0.356],
+        this.materials.creeperFace!
+      );
+      const rightEye = this.createPart(
+        group,
+        [0.15, 0.14, 0.025],
+        [0.18, 1.62, -0.356],
+        this.materials.creeperFace!
+      );
+      const mouth = this.createPart(
+        group,
+        [0.18, 0.21, 0.025],
+        [0, 1.4, -0.356],
+        this.materials.creeperFace!
+      );
+      const leftFrown = this.createPart(
+        group,
+        [0.11, 0.12, 0.025],
+        [-0.12, 1.31, -0.356],
+        this.materials.creeperFace!
+      );
+      const rightFrown = this.createPart(
+        group,
+        [0.11, 0.12, 0.025],
+        [0.12, 1.31, -0.356],
+        this.materials.creeperFace!
+      );
+      leftEye.name = 'Creeper face left eye';
+      rightEye.name = 'Creeper face right eye';
+      mouth.name = 'Creeper face mouth';
+      leftFrown.name = 'Creeper face left frown';
+      rightFrown.name = 'Creeper face right frown';
+
+      const legs = [
+        this.createPart(group, [0.25, 0.52, 0.25], [-0.18, 0.26, -0.2], this.materials.creeperDark!),
+        this.createPart(group, [0.25, 0.52, 0.25], [0.18, 0.26, -0.2], this.materials.creeperSkin!),
+        this.createPart(group, [0.25, 0.52, 0.25], [-0.18, 0.26, 0.2], this.materials.creeperSkin!),
+        this.createPart(group, [0.25, 0.52, 0.25], [0.18, 0.26, 0.2], this.materials.creeperDark!)
+      ];
+      legs.forEach((leg, index) => { leg.name = `Creeper leg ${index + 1}`; });
+
+      const flashShapes: Array<readonly [
+        readonly [number, number, number],
+        readonly [number, number, number]
+      ]> = [
+        [[0.73, 0.73, 0.73], [0, 1.5, 0]],
+        [[0.61, 0.85, 0.45], [0, 0.92, 0]],
+        [[0.27, 0.54, 0.27], [-0.18, 0.26, -0.2]],
+        [[0.27, 0.54, 0.27], [0.18, 0.26, -0.2]],
+        [[0.27, 0.54, 0.27], [-0.18, 0.26, 0.2]],
+        [[0.27, 0.54, 0.27], [0.18, 0.26, 0.2]]
+      ];
+      for (const [size, position] of flashShapes) {
+        const overlay = this.createPart(group, size, position, this.materials.creeperFlash!);
+        overlay.name = 'Creeper flash overlay';
+        overlay.visible = false;
+      }
       return legs;
     }
 

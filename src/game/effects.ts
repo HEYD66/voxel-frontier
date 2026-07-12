@@ -28,6 +28,7 @@ interface Particle {
   velocity: Vector3;
   life: number;
   maxLife: number;
+  baseScale?: number;
 }
 
 export class BlockTargetIndicator extends Group {
@@ -92,6 +93,42 @@ export class BlockParticles extends Group {
     }
   }
 
+  spawnExplosion(position: Vector3, radius = 3): void {
+    const safeRadius = Math.max(0.5, Math.min(8, Number.isFinite(radius) ? radius : 3));
+    const colors = ['#fff2bf', '#efb04f', '#9a7650', '#5b5651', '#2e3030'];
+    for (let i = 0; i < 54; i += 1) {
+      const color = colors[Math.min(colors.length - 1, Math.floor(i / 11))]!;
+      const material = new MeshBasicMaterial({ color: new Color(color) });
+      const mesh = new Mesh(this.cubeGeometry, material);
+      const angle = Math.random() * Math.PI * 2;
+      const vertical = Math.random() * 1.7 - 0.45;
+      const horizontal = Math.sqrt(Math.max(0.05, 1 - Math.min(1, vertical * vertical)));
+      const direction = new Vector3(
+        Math.cos(angle) * horizontal,
+        vertical,
+        Math.sin(angle) * horizontal
+      ).normalize();
+      const speed = 1.8 + Math.random() * safeRadius * 2.2;
+      const life = 0.42 + Math.random() * 0.72;
+      mesh.position.copy(position).add(new Vector3(
+        (Math.random() - 0.5) * 0.42,
+        (Math.random() - 0.5) * 0.42,
+        (Math.random() - 0.5) * 0.42
+      ));
+      mesh.rotation.set(Math.random() * Math.PI, Math.random() * Math.PI, Math.random() * Math.PI);
+      const baseScale = 0.65 + Math.random() * (i < 11 ? 1.1 : 0.75);
+      mesh.scale.setScalar(baseScale);
+      this.add(mesh);
+      this.particles.push({
+        mesh,
+        velocity: direction.multiplyScalar(speed),
+        life,
+        maxLife: life,
+        baseScale
+      });
+    }
+  }
+
   update(dt: number): void {
     for (let i = this.particles.length - 1; i >= 0; i -= 1) {
       const particle = this.particles[i];
@@ -101,7 +138,7 @@ export class BlockParticles extends Group {
       particle.mesh.position.addScaledVector(particle.velocity, dt);
       particle.mesh.rotation.x += dt * 5;
       particle.mesh.rotation.y += dt * 4;
-      const scale = Math.max(0.02, particle.life / particle.maxLife);
+      const scale = Math.max(0.02, particle.life / particle.maxLife) * (particle.baseScale ?? 1);
       particle.mesh.scale.setScalar(scale);
       if (particle.life > 0) continue;
       this.remove(particle.mesh);
@@ -408,6 +445,15 @@ export class HeldBlockView {
     const model = new Group();
     model.rotation.set(-0.18, 0.1, -0.24);
     this.itemModel.add(model);
+
+    if (item === 'gunpowder') {
+      model.name = 'Held gunpowder';
+      this.addItemBox(model, [0.105, 0.09, 0.1], [-0.065, 0.045, 0], '#454640', [0.12, -0.08, 0.18]);
+      this.addItemBox(model, [0.09, 0.075, 0.105], [0.055, 0.07, 0.01], '#6b6a60', [-0.08, 0.14, -0.12]);
+      this.addItemBox(model, [0.115, 0.08, 0.095], [0.05, -0.055, -0.005], '#292a27', [0.08, 0.1, 0.1]);
+      this.addItemBox(model, [0.07, 0.065, 0.11], [-0.075, -0.07, 0.012], '#858277', [-0.12, -0.06, -0.15]);
+      return;
+    }
 
     if (item === 'stick') {
       this.addItemBox(model, [0.055, 0.42, 0.055], [0, 0, 0], '#78502b', [0, 0, -0.45]);

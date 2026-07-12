@@ -22,6 +22,28 @@ describe('WorldDropManager', () => {
     drops.dispose();
   });
 
+  it('renders gunpowder as a dedicated cluster of gray-black grains', () => {
+    const drops = new WorldDropManager();
+    drops.spawn({ item: 'gunpowder', count: 3 }, new Vector3());
+
+    expect(drops.getSnapshots()[0]).toMatchObject({
+      stack: { item: 'gunpowder', count: 3 },
+      visualKind: 'material'
+    });
+    const visual = drops.getObjectByName('Dropped gunpowder');
+    expect(visual).toBeInstanceOf(Group);
+    const grains: Mesh[] = [];
+    visual?.traverse((object) => {
+      if (object instanceof Mesh) grains.push(object);
+    });
+    expect(grains).toHaveLength(4);
+    expect(new Set(grains.map((grain) => (
+      grain.material instanceof MeshLambertMaterial ? grain.material.color.getHexString() : ''
+    )))).toEqual(new Set(['454640', '6b6a60', '292a27', '858277']));
+
+    drops.dispose();
+  });
+
   it('renders diamond resources, tools, and armor with their dedicated procedural palette', () => {
     const drops = new WorldDropManager();
     drops.spawn({ item: 'diamond', count: 1 }, new Vector3());

@@ -1,8 +1,26 @@
-import { Group, Mesh, MeshBasicMaterial, PerspectiveCamera } from 'three';
+import { Group, Mesh, MeshBasicMaterial, PerspectiveCamera, Vector3 } from 'three';
 import { describe, expect, it, vi } from 'vitest';
-import { HeldBlockView } from './effects';
+import { BlockParticles, HeldBlockView } from './effects';
 import { ARMOR_ITEM_IDS, TOOL_ITEM_IDS } from './survival';
 import { BlockId } from './types';
+
+describe('BlockParticles', () => {
+  it('spawns a complete explosion burst and removes it after its lifetime', () => {
+    const particles = new BlockParticles();
+    const random = vi.spyOn(Math, 'random').mockReturnValue(0.5);
+
+    particles.spawnExplosion(new Vector3(2, 3, 4), 3);
+
+    expect(particles.children).toHaveLength(54);
+    expect(particles.children.every((child) => child instanceof Mesh)).toBe(true);
+    expect(particles.children.some((child) => child.scale.x > 1)).toBe(true);
+    particles.update(2);
+    expect(particles.children).toHaveLength(0);
+
+    random.mockRestore();
+    particles.dispose();
+  });
+});
 
 describe('HeldBlockView', () => {
   it('uses and releases a dedicated torch model instead of the block cube', () => {
@@ -88,6 +106,25 @@ describe('HeldBlockView', () => {
     held.setItem(ARMOR_ITEM_IDS.leatherTunic);
     expect(collectColors()).toContain('8b572f');
     expect(collectColors()).toContain('c08452');
+
+    held.dispose();
+  });
+
+  it('renders held gunpowder as a dedicated cluster of gray-black grains', () => {
+    const camera = new PerspectiveCamera(75, 16 / 9, 0.1, 100);
+    const held = new HeldBlockView(camera);
+
+    held.setItem('gunpowder');
+    const model = held.mesh.getObjectByName('Held gunpowder');
+    expect(model).toBeInstanceOf(Group);
+    const parts: Mesh[] = [];
+    model?.traverse((object) => {
+      if (object instanceof Mesh) parts.push(object);
+    });
+    expect(parts).toHaveLength(4);
+    expect(new Set(parts.map((part) => (
+      part.material instanceof MeshBasicMaterial ? part.material.color.getHexString() : ''
+    )))).toEqual(new Set(['454640', '6b6a60', '292a27', '858277']));
 
     held.dispose();
   });
